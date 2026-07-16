@@ -1,0 +1,142 @@
+name: Deploy meander-monitor
+
+# Standalone copy of the fleet pipeline (fwddeployer's deploy-app.yml), with
+# meander-monitor's values inlined. This repo lives outside the FwdFaster org
+# and fwddeployer is private, so the shared `uses:` recipe can't be called from
+# here — the pipeline is vendored instead.
+#
+# NOTE: this is a fork, not a caller. Fixes made to fwddeployer's deploy-app.yml
+# and shipped by moving its `v1` tag do NOT reach this file. If the fleet recipe
+# changes in a way that matters, port it here by hand.
+#
+# Validates migrations on a throwaway Postgres, then (only on push to main)
+# deploys over SSH — build, back up, migrate, restart.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Never let two deploys of this app race. Ref-scoped so PRs don't block each
+# other or main; cancel stale PR checks, but never cancel a running main deploy
+# mid-migration.
+concurrency:
+  group: deploy-meander-monitor-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  migrations-check:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        # pgvector/pgvector:pg15 — a superset of plain pg15, matching prod's
+        # major. We don't use pgvector itself.
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Bootstrap the Supabase-provided environment
+        run: psql -v ON_ERROR_STOP=1 -f supabase/ci-bootstrap.sql
+      - name: Replay all migrations from zero
+        run: bash supabase/migrate.sh
+      - name: Assert every migration is recorded in the ledger
+        run: |
+          files=$(ls supabase/migrations/*.sql | wc -l | tr -d ' ')
+          rows=$(psql -tAc "select count(*) from supabase_migrations.schema_migrations" | tr -d ' ')
+          echo "migration files: $files   ledger rows: $rows"
+          test "$files" = "$rows"
+
+  deploy:
+    needs: migrations-check
+    # Only deploy on a real push to main — not on pull_request validation runs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH (hop through Rodney)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.RODNEY_HOST }}
+          port: 22
+          username: ${{ secrets.RODNEY_USER }}
+          key: ${{ secrets.RODNEY_SSH_KEY }}
+          script: |
+            ssh -o StrictHostKeyChecking=no ${{ secrets.PATRICK_USER }}@${{ secrets.PATRICK_HOST }} << 'DEPLOY'
+            cd /var/www/meander-monitor
+            git checkout -- .
+            git pull origin main
+
+            # 1) Build first — fails before touching the DB.
+            rm -rf .next
+            npm ci
+            npm run build
+            test -f .next/standalone/server.js || { echo "❌ Build failed: server.js missing"; exit 1; }
+            mkdir -p .next/standalone/public
+            cp -r public/* .next/standalone/public/ 2>/dev/null || true
+            mkdir -p .next/standalone/.next/static
+            cp -r .next/static/* .next/standalone/.next/static/
+
+            # 1b) Guard the static copy. `output: standalone` ships NO static
+            #     assets of its own — they're copied in above. If that copy is
+            #     incomplete, the app still boots but the browser 404s JS chunks
+            #     (ChunkLoadError → "Application error"). Assert every built static
+            #     file made it into standalone before we restart onto it.
+            src=$(find .next/static -type f | wc -l)
+            dst=$(find .next/standalone/.next/static -type f | wc -l)
+            [ "$src" -gt 0 ] && [ "$src" -eq "$dst" ] \
+              || { echo "❌ Static assets incomplete ($dst/$src copied) — would ship a ChunkLoadError; aborting before restart"; exit 1; }
+            echo "✓ static assets complete: $dst/$src files"
+
+            # 2) DB connection — the app's Postgres container. Password from the
+            #    container's own env (no host .env read). Needs the deploy user in
+            #    the docker group (CI is non-interactive, so no sudo for docker).
+            PGPW="$(docker exec -i mm-supabase-db printenv POSTGRES_PASSWORD)"
+            DB_EXEC="docker exec -i -e PGPASSWORD=$PGPW mm-supabase-db"
+
+            # 3) Pre-migration backup — abort before migrate if it fails. Keep 10.
+            #    NOTE: this dumps Postgres only. Storage FILES (the `web` bucket)
+            #    are not covered — back up the storage volume separately.
+            mkdir -p /home/casper/meander-monitor-db-backups
+            BACKUP="/home/casper/meander-monitor-db-backups/pre-migrate-$(date -u +%Y%m%dT%H%M%SZ).sql"
+            echo "→ backing up DB to $BACKUP.gz"
+            $DB_EXEC pg_dump -U postgres -d postgres --no-owner > "$BACKUP" \
+              || { echo "❌ Pre-migration backup failed — aborting deploy"; rm -f "$BACKUP"; exit 1; }
+            gzip -f "$BACKUP"
+            ls -1t /home/casper/meander-monitor-db-backups/pre-migrate-*.sql.gz | tail -n +11 | xargs -r rm -f
+
+            # 4) Apply pending migrations, gated — abort before restart on failure.
+            PSQL="$DB_EXEC psql -U postgres -d postgres" ./supabase/migrate.sh \
+              || { echo "❌ Migration failed — aborting deploy (restore from $BACKUP.gz)"; exit 1; }
+
+            # 4b) Reload PostgREST's schema cache so newly-added tables/relationships
+            #     are visible via the REST API without waiting for a container restart.
+            $DB_EXEC psql -U postgres -d postgres -c "notify pgrst, 'reload schema';" || true
+
+            # 5) Restart onto the new code + schema, then verify it actually booted.
+            sudo systemctl restart meander-monitor
+            sleep 2
+            if systemctl is-active --quiet meander-monitor; then
+              echo "✅ meander-monitor is running"
+            else
+              echo "❌ meander-monitor failed to start"
+              journalctl -u meander-monitor -n 40 --no-pager || true
+              exit 1
+            fi
+            DEPLOY

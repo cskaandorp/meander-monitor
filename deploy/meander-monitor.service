@@ -1,0 +1,32 @@
+# Install to /etc/systemd/system/meander-monitor.service, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now meander-monitor
+# Replace <DEPLOY_USER> with the Linux user that owns /var/www/meander-monitor.
+
+[Unit]
+Description=meander-monitor Next.js app
+After=network.target
+
+[Service]
+Type=simple
+User=<DEPLOY_USER>
+# The build copies /public and static into the standalone dir; run from there.
+WorkingDirectory=/var/www/meander-monitor/.next/standalone
+
+# Runtime env. Same .env.local that `next build` reads for the NEXT_PUBLIC_*
+# values — the standalone server does NOT auto-load it, so inject it here. It's
+# gitignored, so the deploy's `git checkout -- . && git pull` leaves it in place.
+EnvironmentFile=/var/www/meander-monitor/.env.local
+Environment=NODE_ENV=production
+Environment=PORT=3050
+# Bind all interfaces: nginx runs on a DIFFERENT box and proxies to
+# 192.168.178.132:3050. (fwdvec pins 127.0.0.1 because its nginx is local — copy
+# that here and nginx gets connection-refused.) Port 3050 must be firewalled to
+# the nginx host only; it serves plain HTTP.
+Environment=HOSTNAME=0.0.0.0
+
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

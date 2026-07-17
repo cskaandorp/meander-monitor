@@ -79,6 +79,7 @@ jobs:
           key: ${{ secrets.RODNEY_SSH_KEY }}
           script: |
             ssh -o StrictHostKeyChecking=no ${{ secrets.PATRICK_USER }}@${{ secrets.PATRICK_HOST }} << 'DEPLOY'
+            set -e
             cd /var/www/meander-monitor
             git checkout -- .
             git pull origin main
@@ -93,21 +94,71 @@ jobs:
             mkdir -p .next/standalone/.next/static
             cp -r .next/static/* .next/standalone/.next/static/
 
-            # 1b) Guard the static copy. `output: standalone` ships NO static
-            #     assets of its own — they're copied in above. If that copy is
-            #     incomplete, the app still boots but the browser 404s JS chunks
-            #     (ChunkLoadError → "Application error"). Assert every built static
-            #     file made it into standalone before we restart onto it.
-            src=$(find .next/static -type f | wc -l)
-            dst=$(find .next/standalone/.next/static -type f | wc -l)
-            [ "$src" -gt 0 ] && [ "$src" -eq "$dst" ] \
-              || { echo "❌ Static assets incomplete ($dst/$src copied) — would ship a ChunkLoadError; aborting before restart"; exit 1; }
-            echo "✓ static assets complete: $dst/$src files"
+            # 1b) Guard the static assets. `output: standalone` ships NO static
+            #     assets of its own — they're copied in above. If anything the
+            #     document references is absent, the app still boots but the
+            #     browser fails to load JS chunks (ChunkLoadError → "Application
+            #     error"), which looks like a crash and isn't.
+            #
+            #     Two distinct failures, two checks. A file-count comparison
+            #     catches NEITHER: on 2026-07-17 it printed "✓ 44/44" and shipped
+            #     a site whose landing page referenced a chunk missing from both
+            #     trees — the copy was perfect, the BUILD was incomplete.
+
+            # (i) copy fidelity — same files, not merely the same number of them
+            diff <(cd .next/static && find . -type f | sort) \
+                 <(cd .next/standalone/.next/static && find . -type f | sort) \
+              || { echo "❌ Static copy incomplete — aborting before restart"; exit 1; }
+
+            # (ii) build integrity — boot the new build on a scratch port and ask
+            #      it what the landing page references, then check every one of
+            #      those files exists. Reading the build manifests instead is not
+            #      enough: Turbopack doesn't write app-build-manifest.json, so the
+            #      manifests name ~9 assets where the rendered page names ~16.
+            #      Only the server knows the real answer, so we ask the server.
+            set -a; [ -f .env.local ] && . ./.env.local; set +a
+            PORT=3099 HOSTNAME=127.0.0.1 node .next/standalone/server.js > /tmp/mm-smoke.log 2>&1 &
+            SMOKE_PID=$!
+            for i in $(seq 1 30); do
+              curl -sf -o /dev/null http://127.0.0.1:3099/ 2>/dev/null && break
+              sleep 0.5
+            done
+            SMOKE_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3099/ || echo 000)
+            curl -s http://127.0.0.1:3099/ | grep -oE '/_next/static/[^"]+\.(js|css)' | sort -u > /tmp/mm-refs.txt || true
+            kill $SMOKE_PID 2>/dev/null || true
+            wait $SMOKE_PID 2>/dev/null || true
+
+            [ "$SMOKE_CODE" = "200" ] || {
+              echo "❌ New build does not serve / (HTTP $SMOKE_CODE) — aborting before restart";
+              tail -20 /tmp/mm-smoke.log; exit 1; }
+
+            REF_COUNT=$(wc -l < /tmp/mm-refs.txt)
+            [ "$REF_COUNT" -gt 0 ] || { echo "❌ Rendered page referenced no static assets — aborting"; exit 1; }
+
+            MISSING=0
+            while read -r ref; do
+              f=".next/standalone/.next/${ref#/_next/}"
+              [ -f "$f" ] || { echo "   MISSING $ref"; MISSING=$((MISSING+1)); }
+            done < /tmp/mm-refs.txt
+            [ "$MISSING" -eq 0 ] || {
+              echo "❌ Build referenced $MISSING of $REF_COUNT assets it never emitted — would ship a ChunkLoadError; aborting before restart";
+              exit 1; }
+            echo "✓ build serves 200 and all $REF_COUNT referenced assets exist"
 
             # 2) DB connection — the app's Postgres container. Password from the
             #    container's own env (no host .env read). Needs the deploy user in
             #    the docker group (CI is non-interactive, so no sudo for docker).
-            PGPW="$(docker exec -i mm-supabase-db printenv POSTGRES_PASSWORD)"
+            #
+            #    ⚠️  EVERY `docker exec -i` below MUST have its stdin redirected.
+            #    This whole script arrives on the remote shell as a heredoc — the
+            #    script IS stdin. `-i` attaches stdin to the container, so any such
+            #    command swallows the REST OF THIS SCRIPT as input, the shell hits
+            #    EOF, and the job exits 0 having silently skipped everything after.
+            #    That is not hypothetical: on 2026-07-17 it ate the backup, the
+            #    migrations and the restart, reported green, and left a stale
+            #    process serving a rebuilt .next (ChunkLoadError) against a
+            #    database with no schema.
+            PGPW="$(docker exec mm-supabase-db printenv POSTGRES_PASSWORD < /dev/null)"
             DB_EXEC="docker exec -i -e PGPASSWORD=$PGPW mm-supabase-db"
 
             # 3) Pre-migration backup — abort before migrate if it fails. Keep 10.
@@ -116,18 +167,25 @@ jobs:
             mkdir -p /home/casper/meander-monitor-db-backups
             BACKUP="/home/casper/meander-monitor-db-backups/pre-migrate-$(date -u +%Y%m%dT%H%M%SZ).sql"
             echo "→ backing up DB to $BACKUP.gz"
-            $DB_EXEC pg_dump -U postgres -d postgres --no-owner > "$BACKUP" \
+            $DB_EXEC pg_dump -U postgres -d postgres --no-owner < /dev/null > "$BACKUP" \
               || { echo "❌ Pre-migration backup failed — aborting deploy"; rm -f "$BACKUP"; exit 1; }
             gzip -f "$BACKUP"
-            ls -1t /home/casper/meander-monitor-db-backups/pre-migrate-*.sql.gz | tail -n +11 | xargs -r rm -f
+            # Prune to the newest 10. `|| true` because `set -e` is on and this is
+            # housekeeping — a pruning hiccup must never abort a deploy.
+            ls -1t /home/casper/meander-monitor-db-backups/pre-migrate-*.sql.gz 2>/dev/null \
+              | tail -n +11 | xargs -r rm -f || true
 
             # 4) Apply pending migrations, gated — abort before restart on failure.
-            PSQL="$DB_EXEC psql -U postgres -d postgres" ./supabase/migrate.sh \
+            #    `< /dev/null` is load-bearing: migrate.sh's own `docker exec -i`
+            #    calls would otherwise inherit this script as their stdin and eat
+            #    it. Its internal per-command redirects (`< "$f"`, pipes) are
+            #    unaffected — they set their own stdin.
+            PSQL="$DB_EXEC psql -U postgres -d postgres" ./supabase/migrate.sh < /dev/null \
               || { echo "❌ Migration failed — aborting deploy (restore from $BACKUP.gz)"; exit 1; }
 
             # 4b) Reload PostgREST's schema cache so newly-added tables/relationships
             #     are visible via the REST API without waiting for a container restart.
-            $DB_EXEC psql -U postgres -d postgres -c "notify pgrst, 'reload schema';" || true
+            $DB_EXEC psql -U postgres -d postgres -c "notify pgrst, 'reload schema';" < /dev/null || true
 
             # 5) Restart onto the new code + schema, then verify it actually booted.
             sudo systemctl restart meander-monitor

@@ -12,9 +12,9 @@
 --   * an `extensions` schema
 --   * the `storage` schema with buckets + objects (the `web` bucket migration
 --     inserts a bucket row and creates RLS policies on storage.objects)
+--   * the `supabase_realtime` publication that the submissions table joins
 --
--- Not here, deliberately: pgvector (unused) and the `supabase_realtime`
--- publication (nothing subscribes yet — add it back with the worker layer).
+-- Not here, deliberately: pgvector (unused).
 
 -- ── Roles ─────────────────────────────────────────────────────────────────
 create role anon                nologin noinherit;
@@ -76,3 +76,8 @@ create table if not exists storage.objects (
 );
 
 alter table storage.objects enable row level security;
+
+-- ── Realtime ──────────────────────────────────────────────────────────────
+-- Supabase's stack ships this publication; `alter publication ... add table`
+-- in the submissions migration needs it to already exist.
+create publication supabase_realtime;

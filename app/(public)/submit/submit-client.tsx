@@ -23,7 +23,12 @@ const STATUS_TEXT: Record<Submission["status"], string> = {
   failed: "Processing failed",
 };
 
-export function SubmitClient() {
+interface SubmitClientProps {
+  locationId: string;
+  locationSlug: string;
+}
+
+export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
   const supabase = useRef(createClient()).current;
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -58,13 +63,17 @@ export function SubmitClient() {
     return () => { cancelled = true; };
   }, [supabase]);
 
+  // Scoped to this location: someone who has filmed three bends should see the
+  // one they're standing at, not a mixed list. RLS already limits this to their
+  // own rows.
   const loadSubmissions = useCallback(async () => {
     const { data } = await supabase
       .from("submissions")
       .select("*")
+      .eq("location_id", locationId)
       .order("created_at", { ascending: false });
     setSubmissions((data as Submission[]) ?? []);
-  }, [supabase]);
+  }, [supabase, locationId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -119,9 +128,11 @@ export function SubmitClient() {
     }
 
     // The leading path segment MUST be the user id: it's what the storage RLS
-    // policy checks, and what tells the worker whose result this is.
+    // policy checks, and what tells the worker whose result this is. The
+    // location slug after it is for humans and workers browsing the bucket —
+    // the authoritative link is submissions.location_id.
     const ext = file.name.split(".").pop()?.toLowerCase() || "mp4";
-    const path = `${userId}/${Date.now()}.${ext}`;
+    const path = `${userId}/${locationSlug}/${Date.now()}.${ext}`;
 
     const { error } = await uploadWithProgress(
       supabase, "submissions", path, file, session.access_token, setProgress
@@ -137,7 +148,7 @@ export function SubmitClient() {
     // worker can never complete.
     const { error: insertError } = await supabase
       .from("submissions")
-      .insert({ user_id: userId, storage_path: path });
+      .insert({ user_id: userId, storage_path: path, location_id: locationId });
 
     setProgress(null);
     if (insertError) {
@@ -158,6 +169,11 @@ export function SubmitClient() {
   }
 
   const busy = progress !== null;
+  // One video at a time: while anything of theirs is still in the pipeline, the
+  // record button goes away. The status list below already says why.
+  const isProcessing = submissions.some(
+    (s) => s.status === "queued" || s.status === "processing"
+  );
 
   return (
     <div className="space-y-6">
@@ -181,7 +197,7 @@ export function SubmitClient() {
             Uploading… {progress}% — keep this page open
           </p>
         </div>
-      ) : (
+      ) : isProcessing ? null : (
         <Button
           size="lg"
           className="h-16 w-full text-base"

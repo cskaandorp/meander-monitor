@@ -65,7 +65,7 @@ called from here. Fleet fixes do not reach this file automatically — port them
 | App URL | `https://mm.compunist.nl` |
 | Supabase | Kong on `:8002`, public at `https://mm-supa.compunist.nl` |
 | DB container | `mm-supabase-db` |
-| Storage bucket | `web` — all website media, public read, 100 MB |
+| Storage buckets | `web` (public read, website media) · `submissions` + `results` (private, volunteer video) |
 
 `.env.local` on the box holds `NEXT_PUBLIC_SUPABASE_URL` and
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`. It's gitignored and read at **build** time, so it must
@@ -74,6 +74,28 @@ exist before the first build. The systemd unit injects it at runtime via
 
 ## Known gaps
 
+- **Deleting a submission leaves its video on disk.** There is no cascade from a
+  database row to a storage file, and there cannot be a simple one: `storage.objects`
+  is only metadata, and the bytes live in the storage volume under storage-api's
+  control. Deleting the row — by FK cascade, by hand, or otherwise — orphans the file
+  silently. Files must be removed through the storage API *before* their row goes.
+
+  Live orphan sources today: any manual `delete from submissions`, and
+  `submissions.user_id`'s `ON DELETE CASCADE` from `auth.users` (pruning anonymous
+  users, which we will eventually want, drops rows and keeps every video).
+
+  **Needs:** app-level delete (storage API, then row) for the paths we control, plus a
+  periodic orphan sweep — list the bucket, drop anything with no matching
+  `submissions.storage_path` — as the safety net that makes it actually true. The
+  sweep most naturally belongs to the Python workers.
+
 - **Storage files aren't backed up.** The deploy's `pg_dump` captures `storage.objects`
-  rows but no actual files. The storage volume needs its own backup.
-- Video upload/transcode (ffmpeg) is not wired up yet — it belongs with the worker layer.
+  rows but no actual files. A lost volume leaves the database pointing confidently at
+  videos that no longer exist. The storage volume needs its own backup.
+
+- **No workers yet.** Nothing writes to `results`, so submissions sit at `queued`
+  forever. The volunteer page says so honestly, but the loop is not closed.
+
+- **`migrations-check` cannot catch data-shape failures.** It replays from an empty
+  database, so a `NOT NULL` or new constraint on an existing table passes CI and fails
+  on the server against real rows. Happened on 2026-07-17 with `submissions.location_id`.

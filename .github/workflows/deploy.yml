@@ -64,8 +64,30 @@ jobs:
           echo "migration files: $files   ledger rows: $rows"
           test "$files" = "$rows"
 
+  # The deploy's one remaining destructive step is the build: by the time it
+  # runs, .next is already gone, so a failure there breaks the running app.
+  # Catching build failures here means the box only ever attempts builds that
+  # have already succeeded once.
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Build
+        # Placeholders: NEXT_PUBLIC_* are baked in at build time and must be
+        # present, but nothing here talks to Supabase — every route is dynamic,
+        # so none are fetched during the build.
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+        run: npm run build
+
   deploy:
-    needs: migrations-check
+    needs: [migrations-check, build-check]
     # Only deploy on a real push to main — not on pull_request validation runs.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -84,7 +106,70 @@ jobs:
             git checkout -- .
             git pull origin main
 
-            # 1) Build first — fails before touching the DB.
+            # ORDER MATTERS. Everything non-destructive happens BEFORE anything
+            # that touches the running app.
+            #
+            # The obvious order — build first, "so the flaky step fails before we
+            # touch the DB" — is a trap, and it cost us a dead site on
+            # 2026-07-17. `rm -rf .next` and `npm ci` destroy what the LIVE
+            # process is serving from, on step one. Every gate after that (smoke
+            # test, backup, migration) can then abort with production already
+            # broken — and the migration gate exists precisely to abort. A
+            # correctly-refused migration took the site down.
+            #
+            # So: back up and migrate FIRST, while the old app runs happily on the
+            # old schema. Only once the database is good do we disturb the app.
+            #
+            # Residual hole: a build failure still breaks the running app, since
+            # by then .next is gone. The build-check CI job catches that before we
+            # ever get here. Closing it properly means releases/<sha> directories
+            # and an atomic symlink swap — worth doing if this ever bites.
+
+            # 1) DB connection — the app's Postgres container. Password from the
+            #    container's own env (no host .env read). Needs the deploy user in
+            #    the docker group (CI is non-interactive, so no sudo for docker).
+            #
+            #    ⚠️  EVERY `docker exec -i` below MUST have its stdin redirected.
+            #    This whole script arrives on the remote shell as a heredoc — the
+            #    script IS stdin. `-i` attaches stdin to the container, so any such
+            #    command swallows the REST OF THIS SCRIPT as input, the shell hits
+            #    EOF, and the job exits 0 having silently skipped everything after.
+            #    That is not hypothetical: on 2026-07-17 it ate the backup, the
+            #    migrations and the restart, reported green, and left a stale
+            #    process serving a rebuilt .next (ChunkLoadError) against a
+            #    database with no schema.
+            PGPW="$(docker exec mm-supabase-db printenv POSTGRES_PASSWORD < /dev/null)"
+            DB_EXEC="docker exec -i -e PGPASSWORD=$PGPW mm-supabase-db"
+
+            # 2) Pre-migration backup — abort before migrate if it fails. Keep 10.
+            #    NOTE: this dumps Postgres only. Storage FILES (the buckets) are
+            #    not covered — back up the storage volume separately.
+            mkdir -p /home/casper/meander-monitor-db-backups
+            BACKUP="/home/casper/meander-monitor-db-backups/pre-migrate-$(date -u +%Y%m%dT%H%M%SZ).sql"
+            echo "→ backing up DB to $BACKUP.gz"
+            $DB_EXEC pg_dump -U postgres -d postgres --no-owner < /dev/null > "$BACKUP" \
+              || { echo "❌ Pre-migration backup failed — aborting deploy"; rm -f "$BACKUP"; exit 1; }
+            gzip -f "$BACKUP"
+            # Prune to the newest 10. `|| true` because `set -e` is on and this is
+            # housekeeping — a pruning hiccup must never abort a deploy.
+            ls -1t /home/casper/meander-monitor-db-backups/pre-migrate-*.sql.gz 2>/dev/null \
+              | tail -n +11 | xargs -r rm -f || true
+
+            # 3) Apply pending migrations. Nothing has been disturbed yet, so a
+            #    failure here leaves the running app exactly as it was.
+            #    `< /dev/null` is load-bearing: migrate.sh's own `docker exec -i`
+            #    calls would otherwise inherit this script as their stdin and eat
+            #    it. Its internal per-command redirects (`< "$f"`, pipes) are
+            #    unaffected — they set their own stdin.
+            PSQL="$DB_EXEC psql -U postgres -d postgres" ./supabase/migrate.sh < /dev/null \
+              || { echo "❌ Migration failed — app untouched, still serving old code (restore from $BACKUP.gz)"; exit 1; }
+
+            # 3b) Reload PostgREST's schema cache so newly-added tables/relationships
+            #     are visible via the REST API without waiting for a container restart.
+            $DB_EXEC psql -U postgres -d postgres -c "notify pgrst, 'reload schema';" < /dev/null || true
+
+            # 4) From HERE ON we are destructive: npm ci wipes node_modules and
+            #    rm -rf .next deletes what the live process serves.
             rm -rf .next
             npm ci
             npm run build
@@ -144,48 +229,6 @@ jobs:
               echo "❌ Build referenced $MISSING of $REF_COUNT assets it never emitted — would ship a ChunkLoadError; aborting before restart";
               exit 1; }
             echo "✓ build serves 200 and all $REF_COUNT referenced assets exist"
-
-            # 2) DB connection — the app's Postgres container. Password from the
-            #    container's own env (no host .env read). Needs the deploy user in
-            #    the docker group (CI is non-interactive, so no sudo for docker).
-            #
-            #    ⚠️  EVERY `docker exec -i` below MUST have its stdin redirected.
-            #    This whole script arrives on the remote shell as a heredoc — the
-            #    script IS stdin. `-i` attaches stdin to the container, so any such
-            #    command swallows the REST OF THIS SCRIPT as input, the shell hits
-            #    EOF, and the job exits 0 having silently skipped everything after.
-            #    That is not hypothetical: on 2026-07-17 it ate the backup, the
-            #    migrations and the restart, reported green, and left a stale
-            #    process serving a rebuilt .next (ChunkLoadError) against a
-            #    database with no schema.
-            PGPW="$(docker exec mm-supabase-db printenv POSTGRES_PASSWORD < /dev/null)"
-            DB_EXEC="docker exec -i -e PGPASSWORD=$PGPW mm-supabase-db"
-
-            # 3) Pre-migration backup — abort before migrate if it fails. Keep 10.
-            #    NOTE: this dumps Postgres only. Storage FILES (the `web` bucket)
-            #    are not covered — back up the storage volume separately.
-            mkdir -p /home/casper/meander-monitor-db-backups
-            BACKUP="/home/casper/meander-monitor-db-backups/pre-migrate-$(date -u +%Y%m%dT%H%M%SZ).sql"
-            echo "→ backing up DB to $BACKUP.gz"
-            $DB_EXEC pg_dump -U postgres -d postgres --no-owner < /dev/null > "$BACKUP" \
-              || { echo "❌ Pre-migration backup failed — aborting deploy"; rm -f "$BACKUP"; exit 1; }
-            gzip -f "$BACKUP"
-            # Prune to the newest 10. `|| true` because `set -e` is on and this is
-            # housekeeping — a pruning hiccup must never abort a deploy.
-            ls -1t /home/casper/meander-monitor-db-backups/pre-migrate-*.sql.gz 2>/dev/null \
-              | tail -n +11 | xargs -r rm -f || true
-
-            # 4) Apply pending migrations, gated — abort before restart on failure.
-            #    `< /dev/null` is load-bearing: migrate.sh's own `docker exec -i`
-            #    calls would otherwise inherit this script as their stdin and eat
-            #    it. Its internal per-command redirects (`< "$f"`, pipes) are
-            #    unaffected — they set their own stdin.
-            PSQL="$DB_EXEC psql -U postgres -d postgres" ./supabase/migrate.sh < /dev/null \
-              || { echo "❌ Migration failed — aborting deploy (restore from $BACKUP.gz)"; exit 1; }
-
-            # 4b) Reload PostgREST's schema cache so newly-added tables/relationships
-            #     are visible via the REST API without waiting for a container restart.
-            $DB_EXEC psql -U postgres -d postgres -c "notify pgrst, 'reload schema';" < /dev/null || true
 
             # 5) Restart onto the new code + schema, then verify it actually booted.
             sudo systemctl restart meander-monitor

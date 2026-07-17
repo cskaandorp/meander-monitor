@@ -1,0 +1,19 @@
+# The video worker. Deployed by hand on Rodney — NOT part of the app's deploy
+# pipeline. To ship a change:
+#
+#   git pull && docker compose up -d --build
+#
+# Outbound-only: it dials Supabase over the public URL and holds no inbound
+# ports, so there is nothing to firewall and no nginx in front of it.
+name: meander-worker
+
+services:
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # One worker is enough for a 1:1 app. To scale, raise replicas (or run this
+    # compose on another box) — claim_submission()'s SKIP LOCKED makes competing
+    # workers safe with no other change.
+    # deploy:
+    #   replicas: 1

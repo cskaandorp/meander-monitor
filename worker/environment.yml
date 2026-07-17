@@ -1,0 +1,13 @@
+# Conda env for the worker. pyorc pulls in GDAL + OpenCV + rasterio + numba —
+# heavy geospatial/CV libraries that conda-forge ships as prebuilt binaries,
+# which is why this is a conda env and not a plain requirements.txt (GDAL from
+# pip is a well-known pain). supabase is pip-only, layered on top.
+name: base
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pyopenrivercam
+  - pip
+  - pip:
+      - supabase>=2.7

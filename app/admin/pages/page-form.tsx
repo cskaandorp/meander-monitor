@@ -295,6 +295,14 @@ export function PageForm({ page, blocks: initialBlocks, images: initialImages }:
     []
   );
 
+  const updateBlockType = useCallback((id: string, type: string) => {
+    // Content shape is per-type, so switching resets it rather than leaving
+    // a richtext document in a media block.
+    setBlocks((prev) =>
+      prev.map((b) => (b.id === id ? { ...b, type, content: {} } : b))
+    );
+  }, []);
+
   const updateBlockTitle = useCallback(
     (id: string, title: string | null) => {
       setBlocks((prev) =>
@@ -527,12 +535,14 @@ export function PageForm({ page, blocks: initialBlocks, images: initialImages }:
                       <ContentBlockEditor
                         key={block.id}
                         id={block.id}
+                        type={block.type}
                         title={block.title}
                         content={block.content}
                         timestamp={block.timestamp}
                         onContentChange={(content) =>
                           updateBlockContent(block.id, content)
                         }
+                        onTypeChange={(type) => updateBlockType(block.id, type)}
                         onTitleChange={(title) => updateBlockTitle(block.id, title)}
                         onTimestampChange={(ts) => updateBlockTimestamp(block.id, ts)}
                         onDelete={() => deleteBlock(block.id)}

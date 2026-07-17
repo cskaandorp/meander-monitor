@@ -162,13 +162,13 @@ export async function savePageWithBlocks(
     finalPageId = newPage.id;
   }
 
-  // Blocks and images are replaced wholesale on save, so any image the editor
-  // dropped is now unreferenced — delete the file before the row goes with it.
+  // Blocks and images are replaced wholesale on save, so any file the editor
+  // dropped is now unreferenced — delete it before the row goes with it.
   if (pageId) {
-    const { data: oldImages } = await supabase
-      .from("page_images")
-      .select("image_url")
-      .eq("page_id", pageId);
+    const [{ data: oldImages }, { data: oldBlocks }] = await Promise.all([
+      supabase.from("page_images").select("image_url").eq("page_id", pageId),
+      supabase.from("blocks").select("type, content").eq("page_id", pageId),
+    ]);
 
     if (oldImages) {
       const newImageUrls = new Set(parsedImages.data.map((img) => img.image_url));
@@ -176,6 +176,25 @@ export async function savePageWithBlocks(
         oldImages
           .filter((old) => !newImageUrls.has(old.image_url))
           .map((old) => deleteMedia(old.image_url))
+      );
+    }
+
+    // Media blocks carry a file (and, for video, a generated poster). Collect
+    // both sides as URL sets so a swapped-out video doesn't strand its thumbnail.
+    if (oldBlocks) {
+      const mediaUrls = (rows: { type: string; content: unknown }[]) =>
+        new Set(
+          rows
+            .filter((b) => b.type === "media")
+            .flatMap((b) => {
+              const c = (b.content ?? {}) as Record<string, unknown>;
+              return [c.url, c.thumbnail_url].filter(Boolean) as string[];
+            })
+        );
+
+      const kept = mediaUrls(parsedBlocks.data as { type: string; content: unknown }[]);
+      await Promise.all(
+        [...mediaUrls(oldBlocks)].filter((url) => !kept.has(url)).map((url) => deleteMedia(url))
       );
     }
 

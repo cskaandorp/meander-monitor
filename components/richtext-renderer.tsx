@@ -44,7 +44,7 @@ export function RichtextRenderer({ content }: RichtextRendererProps) {
 
   return (
     <div
-      className="prose max-w-none text-gray-600"
+      className="prose max-w-none text-foreground/80"
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

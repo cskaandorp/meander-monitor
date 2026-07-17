@@ -7,6 +7,7 @@ import { GripVertical, Trash2, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MediaUpload, type MediaValue } from "@/components/media-upload";
 import dynamic from "next/dynamic";
 
 const TiptapEditor = dynamic(
@@ -14,12 +15,19 @@ const TiptapEditor = dynamic(
   { ssr: false, loading: () => <div className="min-h-[200px] rounded-md border p-4" /> }
 );
 
+const BLOCK_TYPES = [
+  { value: "richtext", label: "Richtext" },
+  { value: "media", label: "Media" },
+] as const;
+
 interface ContentBlockEditorProps {
   id: string;
+  type: string;
   title: string | null;
   content: Record<string, unknown>;
   timestamp: string | null;
   onContentChange: (content: Record<string, unknown>) => void;
+  onTypeChange: (type: string) => void;
   onTitleChange: (title: string | null) => void;
   onTimestampChange: (timestamp: string | null) => void;
   onDelete: () => void;
@@ -27,10 +35,12 @@ interface ContentBlockEditorProps {
 
 export function ContentBlockEditor({
   id,
+  type,
   title,
   content,
   timestamp,
   onContentChange,
+  onTypeChange,
   onTitleChange,
   onTimestampChange,
   onDelete,
@@ -44,6 +54,14 @@ export function ContentBlockEditor({
     transition,
     opacity: isDragging ? 0.5 : 1,
   };
+
+  const mediaValue: MediaValue | null = content.url
+    ? {
+        url: content.url as string,
+        media_type: (content.media_type as "image" | "video") ?? "image",
+        thumbnail_url: content.thumbnail_url as string | undefined,
+      }
+    : null;
 
   return (
     <div ref={setNodeRef} style={style} className="rounded-md border bg-card">
@@ -66,8 +84,24 @@ export function ContentBlockEditor({
           ) : (
             <ChevronDown className="h-4 w-4" />
           )}
-          {title || "Richtext"}
+          {title || BLOCK_TYPES.find((t) => t.value === type)?.label || "Block"}
         </button>
+        <div className="ml-2 flex items-center gap-1">
+          {BLOCK_TYPES.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                type === t.value
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => onTypeChange(t.value)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto">
           <Button
             type="button"
@@ -106,10 +140,43 @@ export function ContentBlockEditor({
               }
             />
           </div>
-          <div className="space-y-2">
-            <Label>Content</Label>
-            <TiptapEditor content={content} onChange={onContentChange} />
-          </div>
+
+          {type === "richtext" && (
+            <div className="space-y-2">
+              <Label>Content</Label>
+              <TiptapEditor content={content} onChange={onContentChange} />
+            </div>
+          )}
+
+          {type === "media" && (
+            <>
+              <div className="space-y-2">
+                <Label>Image or video</Label>
+                <MediaUpload
+                  value={mediaValue}
+                  onChange={(media) =>
+                    onContentChange(
+                      media
+                        ? {
+                            ...content,
+                            url: media.url,
+                            media_type: media.media_type,
+                            thumbnail_url: media.thumbnail_url,
+                          }
+                        : { text: content.text }
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Caption (optional)</Label>
+                <TiptapEditor
+                  content={(content.text as Record<string, unknown>) ?? {}}
+                  onChange={(text) => onContentChange({ ...content, text })}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

@@ -10,10 +10,15 @@ interface UploadState {
 
 export interface UploadResult {
   url: string;
+  mediaType?: "image" | "video";
   thumbnailUrl?: string;
 }
 
-export function useFileUpload(type: "image" | "video") {
+/**
+ * `type` tells the server what to expect. "auto" lets the file's own MIME type
+ * decide — used by the media block, where one input takes images or videos.
+ */
+export function useFileUpload(type: "image" | "video" | "auto") {
   const [state, setState] = useState<UploadState>({
     phase: "idle",
     progress: 0,
@@ -51,7 +56,11 @@ export function useFileUpload(type: "image" | "video") {
             } else {
               setState({ phase: "done", progress: 100, error: null });
               setTimeout(() => setState({ phase: "idle", progress: 0, error: null }), 1500);
-              resolve({ url: data.url, thumbnailUrl: data.thumbnailUrl });
+              resolve({
+                url: data.url,
+                mediaType: data.mediaType,
+                thumbnailUrl: data.thumbnailUrl,
+              });
             }
           } catch {
             setState({ phase: "error", progress: 0, error: "Upload failed" });

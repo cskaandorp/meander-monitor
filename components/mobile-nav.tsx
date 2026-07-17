@@ -33,12 +33,12 @@ function MobileNavLink({
   const isActive = pathname === href;
   return (
     <div
-      className={`border-l-[3px] pl-4 ${isActive ? "border-orange-500" : "border-transparent"}`}
+      className={`border-l-[3px] pl-4 ${isActive ? "border-accent" : "border-transparent"}`}
     >
       <Link
         href={href}
         className={`block py-2.5 text-base font-medium transition-colors hover:text-foreground ${
-          isActive ? "text-orange-500" : "text-muted-foreground"
+          isActive ? "text-primary" : "text-muted-foreground"
         }`}
         onClick={onNavigate}
       >

@@ -118,6 +118,55 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/*
+ * WUR theme — scoped to the public site only; /admin keeps the neutral shadcn
+ * defaults above. Applied by the wrapper in app/(public)/layout.tsx, so every
+ * shadcn component inside resolves to these values automatically.
+ *
+ * Palette lifted from wur.nl's own stylesheets (their tokens are minified to
+ * names like --sihkgh10, hence the plain hex here):
+ *   #FBF6E5  lightest cream — page ground
+ *   #F3ECD3  cream — surfaces, muted fills
+ *   #E9E1C4  sand — borders
+ *   #153816  near-black forest green — body text
+ *   #004D00  dark green — primary
+ *   #008A00  bright green — focus/hover
+ *   #97C600  lime — accent (the callout cards)
+ *   #661118  dark red — destructive
+ *
+ * WUR's own typeface is proprietary; Outfit is the closest geometric stand-in
+ * and is already loaded for headings.
+ */
+.theme-wur {
+  --radius: 1.25rem; /* WUR is markedly rounder than shadcn's 0.625rem */
+
+  --background: #fbf6e5;
+  --foreground: #153816;
+
+  --card: #f3ecd3;
+  --card-foreground: #153816;
+  --popover: #fbf6e5;
+  --popover-foreground: #153816;
+
+  --primary: #004d00;
+  --primary-foreground: #fbf6e5;
+
+  --secondary: #f3ecd3;
+  --secondary-foreground: #153816;
+
+  --muted: #f3ecd3;
+  --muted-foreground: #153816cc;
+
+  --accent: #97c600;
+  --accent-foreground: #153816;
+
+  --destructive: #661118;
+
+  --border: #e9e1c4;
+  --input: #e9e1c4;
+  --ring: #008a00;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

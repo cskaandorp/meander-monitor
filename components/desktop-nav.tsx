@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const activeClass = "text-sm font-medium text-orange-500 transition-colors";
+const activeClass = "text-sm font-medium text-primary transition-colors";
 const defaultClass = "text-sm text-muted-foreground hover:text-foreground transition-colors";
 
 function ActiveBar() {
-  return <span className="absolute bottom-0 left-0 right-0 h-[3px] bg-orange-500" />;
+  return <span className="absolute bottom-0 left-0 right-0 h-[3px] bg-accent" />;
 }
 
 interface NavPage {

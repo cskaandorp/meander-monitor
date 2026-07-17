@@ -12,7 +12,7 @@ export const pageSchema = z.object({
 
 export const contentBlockSchema = z.object({
   id: z.string().uuid(),
-  type: z.enum(["richtext"]).default("richtext"),
+  type: z.enum(["richtext", "media"]).default("richtext"),
   title: z.string().nullable().optional(),
   content: z.record(z.string(), z.unknown()).default({}),
   sort_order: z.number().int(),

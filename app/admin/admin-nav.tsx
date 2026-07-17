@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { href: "/admin/landing", label: "Landing" },
   { href: "/admin/pages", label: "Pages" },
+  { href: "/admin/locations", label: "Locations" },
 ];
 
 export function AdminNav() {

@@ -44,10 +44,16 @@ create policy "Admins manage locations"
 alter table submissions
   add column location_id uuid references locations(id) on delete restrict;
 
--- Requiring it immediately is safe: anonymous sign-in has never succeeded in
--- any environment, so no submission has ever been created. If this statement
--- fails, the table is NOT empty — stop and decide what location those rows
--- belong to rather than forcing it through.
+-- Any submission that predates this migration has no location and cannot be
+-- given one — we do not know where it was filmed, and guessing would poison the
+-- data. Such rows can only be test uploads from the day /submit was built, and
+-- a recording without a location is exactly what this table now refuses to
+-- hold, so they go.
+--
+-- This can never match a row created after this point: location_id is NOT NULL
+-- from the next statement onward. On a fresh database (CI) it is a no-op.
+delete from submissions where location_id is null;
+
 alter table submissions
   alter column location_id set not null;
 

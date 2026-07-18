@@ -64,17 +64,20 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
     return () => { cancelled = true; };
   }, [supabase]);
 
-  // Scoped to this location: someone who has filmed three bends should see the
-  // one they're standing at, not a mixed list. RLS already limits this to their
-  // own rows.
+  // Scoped to this location AND explicitly to this session's own user. The
+  // user_id filter is load-bearing: RLS lets ADMINS read every row (that powers
+  // the admin Submissions page), so without it an admin viewing /submit would
+  // see everyone's uploads. This is the volunteer view — always just yours.
   const loadSubmissions = useCallback(async () => {
+    if (!userId) return;
     const { data } = await supabase
       .from("submissions")
       .select("*")
       .eq("location_id", locationId)
+      .eq("user_id", userId)
       .order("created_at", { ascending: false });
     setSubmissions((data as Submission[]) ?? []);
-  }, [supabase, locationId]);
+  }, [supabase, locationId, userId]);
 
   useEffect(() => {
     if (!userId) return;
@@ -114,6 +117,37 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
     })();
   }, [submissions, supabase]);
 
+  // Bring a result into view the moment it finishes — but only for submissions
+  // that transition to a terminal state DURING this session (never on initial
+  // page load, which would yank the page around on arrival).
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const prevStatus = useRef<Record<string, string>>({});
+  const awaitingScroll = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    // 1) Note any submission that just transitioned to a terminal state. The
+    //    status change and the result-image URL arrive on different renders, so
+    //    we remember the transition and scroll later, once the display is ready.
+    for (const s of submissions) {
+      const was = prevStatus.current[s.id];
+      prevStatus.current[s.id] = s.status;
+      if (was && was !== s.status && (s.status === "done" || s.status === "failed")) {
+        awaitingScroll.current.add(s.id);
+      }
+    }
+
+    // 2) Scroll each awaiting result once what we'll show actually exists.
+    for (const id of [...awaitingScroll.current]) {
+      const s = submissions.find((x) => x.id === id);
+      if (!s) continue;
+      const ready = s.status === "failed" || (s.status === "done" && !!resultUrls[id]);
+      if (ready) {
+        awaitingScroll.current.delete(id);
+        cardRefs.current[id]?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  }, [submissions, resultUrls]);
+
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file || !userId) return;
@@ -151,13 +185,16 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
       .from("submissions")
       .insert({ user_id: userId, storage_path: path, location_id: locationId });
 
-    setProgress(null);
     if (insertError) {
+      setProgress(null);
       setUploadError(insertError.message);
       return;
     }
     if (inputRef.current) inputRef.current.value = "";
-    loadSubmissions();
+    // Load the queued row into state BEFORE clearing the progress bar, so the
+    // record button never flashes in the gap between upload and processing.
+    await loadSubmissions();
+    setProgress(null);
   }
 
   if (authError) {
@@ -208,7 +245,7 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
           {userId ? (
             <>
               <Video className="mr-2 h-5 w-5" />
-              Record a video
+              {submissions.length > 0 ? "Record another video" : "Record a video"}
             </>
           ) : (
             <>
@@ -230,7 +267,13 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
         <div className="space-y-3">
           <h2 className="text-sm font-medium text-muted-foreground">Your videos</h2>
           {submissions.map((s) => (
-            <div key={s.id} className="rounded-lg border p-3">
+            <div
+              key={s.id}
+              ref={(el) => {
+                cardRefs.current[s.id] = el;
+              }}
+              className="rounded-lg border p-3"
+            >
               <div className="flex items-center gap-2 text-sm">
                 {s.status === "done" ? (
                   <CheckCircle2 className="h-4 w-4 text-primary" />

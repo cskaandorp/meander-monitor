@@ -76,6 +76,23 @@ def process_video(video_path: Path, location: dict, out_dir: Path) -> dict:
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
+    # Orientation. Phones store portrait clips as landscape pixels + a rotation
+    # flag; browsers honour it but OpenCV usually does not, so results come back
+    # sideways. Disable any auto-rotate, read the flag ourselves, and apply it to
+    # every frame — so exactly one rotation happens regardless of the build.
+    rotate_code = None
+    auto = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    meta = getattr(cv2, "CAP_PROP_ORIENTATION_META", None)
+    if auto is not None:
+        cap.set(auto, 0)
+    if meta is not None:
+        angle = int(cap.get(meta) or 0) % 360
+        rotate_code = {
+            90: cv2.ROTATE_90_CLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }.get(angle)
+
     # Skip ~1s: the opening frames are often unsteady or still auto-focusing.
     for _ in range(int(fps)):
         cap.grab()
@@ -92,6 +109,8 @@ def process_video(video_path: Path, location: dict, out_dir: Path) -> dict:
         ok, frame = cap.read()
         if not ok:
             break
+        if rotate_code is not None:
+            frame = cv2.rotate(frame, rotate_code)
         h, w = frame.shape[:2]
         if w > WORK_W:
             scale = WORK_W / w

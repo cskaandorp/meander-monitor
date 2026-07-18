@@ -20,6 +20,7 @@ The one thing to fill in is process_video(). Everything around it is plumbing.
 
 import asyncio
 import os
+import shutil
 import signal
 import socket
 import tempfile
@@ -239,9 +240,8 @@ async def process_one(sb: AsyncClient) -> bool:
 
     finally:
         heartbeat.cancel()
-        for f in tmp.glob("*"):
-            f.unlink(missing_ok=True)
-        tmp.rmdir()
+        # Recursive: tmp holds the video AND the out/ subdirectory of artifacts.
+        shutil.rmtree(tmp, ignore_errors=True)
 
     return True
 

@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { FileText, Layout, MapPin } from "lucide-react";
+import { FileText, Layout, MapPin, Film } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 
 const links = [
   { href: "/admin/landing", label: "Landing", description: "Manage the landing page", icon: Layout },
   { href: "/admin/pages", label: "Pages", description: "Create and manage pages", icon: FileText },
   { href: "/admin/locations", label: "Locations", description: "Monitoring spots and QR codes", icon: MapPin },
+  { href: "/admin/submissions", label: "Submissions", description: "Harvest, download and delete uploads", icon: Film },
 ];
 
 export default function AdminDashboard() {

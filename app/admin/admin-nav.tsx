@@ -8,6 +8,7 @@ const navItems = [
   { href: "/admin/landing", label: "Landing" },
   { href: "/admin/pages", label: "Pages" },
   { href: "/admin/locations", label: "Locations" },
+  { href: "/admin/submissions", label: "Submissions" },
 ];
 
 export function AdminNav() {

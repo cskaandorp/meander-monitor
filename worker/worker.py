@@ -46,25 +46,116 @@ def _now() -> str:
 
 
 # ── The actual work ────────────────────────────────────────────────────────
-def process_video(video_path: Path, location: dict) -> dict:
+def process_video(video_path: Path, location: dict, out_dir: Path) -> dict:
     """
-    Turn a river video into a flow measurement with pyorc.
+    Produce a result for one video, writing any artifact files into out_dir.
 
-    STUB — this is where your pyorc code goes. It runs in a thread (see
-    process_one), so blocking/CPU-heavy work is fine here.
+    Contract: write output file(s) into out_dir and return
+        {"primary": "<filename in out_dir to show the volunteer>",
+         "stats":   {<json-serialisable numbers>}}
+    Runs in a worker thread, so blocking/CPU-heavy work is fine.
 
-    `location` is the full row from the `locations` table for this submission:
-    slug, name, latitude, longitude, and whatever calibration fields you add.
-    LSPIV needs the camera's perspective (ground control points / homography /
-    scale) — if that's per-location, store it on the location row and read it
-    here. That's the reason the worker fetches the location at all.
+    THIS IS TIER 0 — the proof-of-concept path: uncalibrated surface motion,
+    straight from the pixels, needing no per-site survey data. It uses OpenCV
+    dense optical flow (Farneback) to estimate how the surface moves between
+    frames, then draws motion arrows over a real frame. The numbers are in
+    pixels/frame, NOT m/s — there is no georeferencing here.
 
-    Return a JSON-serialisable dict — it becomes submissions.result and is what
-    the uploader's page can display.
+    When a location eventually carries real pyorc calibration, this is where the
+    branch goes: if `location` has that config, run the calibrated pyorc pipeline
+    instead and return metres/second (and, with a cross-section, discharge). The
+    plumbing around this function does not change — only what it returns.
     """
-    raise NotImplementedError(
-        "process_video() is a stub — drop the pyorc processing in here"
+    import cv2
+    import numpy as np
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open video: {video_path.name}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+    # Skip ~1s: the opening frames are often unsteady or still auto-focusing.
+    for _ in range(int(fps)):
+        cap.grab()
+
+    WORK_W = 720       # downscale wide frames for speed; plenty for a PoC visual
+    MAX_PAIRS = 60     # bound the work — ~2-3s of footage is enough to see motion
+
+    prev_gray = None
+    flow_sum = None
+    base_bgr = None
+    pairs = 0
+
+    while pairs < MAX_PAIRS:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        h, w = frame.shape[:2]
+        if w > WORK_W:
+            scale = WORK_W / w
+            frame = cv2.resize(frame, (WORK_W, int(h * scale)), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if base_bgr is None:
+            base_bgr = frame.copy()
+        if prev_gray is not None:
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+            )
+            flow_sum = flow if flow_sum is None else flow_sum + flow
+            pairs += 1
+        prev_gray = gray
+
+    cap.release()
+
+    if pairs == 0 or base_bgr is None:
+        raise RuntimeError("video too short to measure motion")
+
+    mean_flow = flow_sum / pairs                       # (H, W, 2), pixels/frame
+    mag = np.sqrt(mean_flow[..., 0] ** 2 + mean_flow[..., 1] ** 2)
+    p95 = float(np.percentile(mag, 95))
+
+    stats = {
+        "tier": 0,
+        "method": "opencv-farneback-optical-flow",
+        "units": "pixels-per-frame (uncalibrated)",
+        "frames_analyzed": pairs + 1,
+        "fps": round(float(fps), 2),
+        "mean_speed_px_per_frame": round(float(mag.mean()), 3),
+        "median_speed_px_per_frame": round(float(np.median(mag)), 3),
+        "p95_speed_px_per_frame": round(p95, 3),
+        "max_speed_px_per_frame": round(float(mag.max()), 3),
+        "frame_size_px": [int(base_bgr.shape[1]), int(base_bgr.shape[0])],
+    }
+
+    # Draw a grid of motion arrows, coloured green→red by speed, scaled so a
+    # typical (p95) arrow spans about one grid cell.
+    overlay = base_bgr.copy()
+    H, W = mag.shape
+    grid = 28
+    denom = p95 if p95 > 1e-6 else max(float(mag.max()), 1.0)
+    arrow_scale = grid * 0.9 / denom
+    for y in range(grid // 2, H, grid):
+        for x in range(grid // 2, W, grid):
+            dx, dy = mean_flow[y, x]
+            m = float(np.hypot(dx, dy))
+            if m < 0.15:                                # skip near-static cells
+                continue
+            ex, ey = int(x + dx * arrow_scale), int(y + dy * arrow_scale)
+            t = min(1.0, m / denom)
+            color = (0, int(255 * (1 - t)), int(255 * t))   # BGR: green→red
+            cv2.arrowedLine(overlay, (x, y), (ex, ey), color, 2, tipLength=0.35)
+
+    out = cv2.addWeighted(overlay, 0.85, base_bgr, 0.15, 0)
+    cv2.putText(
+        out, "surface motion (uncalibrated PoC)", (12, 26),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
     )
+
+    out_path = out_dir / "overlay.png"
+    cv2.imwrite(str(out_path), out)
+
+    return {"primary": "overlay.png", "stats": stats}
 
 
 # ── Plumbing ───────────────────────────────────────────────────────────────
@@ -110,30 +201,34 @@ async def process_one(sb: AsyncClient) -> bool:
         video_path = tmp / Path(sub["storage_path"]).name
         video_path.write_bytes(video_bytes)
 
-        # Heavy/blocking pyorc work — off the event loop so the heartbeat keeps ticking.
-        result = await asyncio.to_thread(process_video, video_path, location)
+        # Heavy/blocking work — off the event loop so the heartbeat keeps ticking.
+        out_dir = tmp / "out"
+        out_dir.mkdir()
+        result = await asyncio.to_thread(process_video, video_path, location, out_dir)
 
-        # Result goes to results/<user_id>/... so the storage RLS lets the
-        # uploader read it (policy keys off the leading path segment).
-        result_name = f"{Path(sub['storage_path']).stem}-result.json"
-        result_path = f"{sub['user_id']}/{result_name}"
-        import json
-
-        await sb.storage.from_(RESULTS_BUCKET).upload(
-            result_path,
-            json.dumps(result).encode(),
-            {"content-type": "application/json", "upsert": "true"},
-        )
+        # Upload every artifact under results/<user_id>/<submission_id>/... so the
+        # storage RLS lets the uploader read it (policy keys off the first path
+        # segment = user_id). result_path points at the primary one to display.
+        primary_path = None
+        for art in sorted(out_dir.iterdir()):
+            dest = f"{sub['user_id']}/{sub_id}/{art.name}"
+            content_type = "image/png" if art.suffix == ".png" else "application/octet-stream"
+            await sb.storage.from_(RESULTS_BUCKET).upload(
+                dest, art.read_bytes(), {"content-type": content_type, "upsert": "true"}
+            )
+            if art.name == result.get("primary"):
+                primary_path = dest
 
         await sb.table("submissions").update(
             {
                 "status": "done",
-                "result_path": result_path,
+                "result_path": primary_path,
+                "result": result.get("stats", {}),
                 "finished_at": _now(),
                 "error": None,
             }
         ).eq("id", sub_id).execute()
-        print(f"[{WORKER_ID}] done {sub_id}", flush=True)
+        print(f"[{WORKER_ID}] done {sub_id} → {primary_path}", flush=True)
 
     except Exception:
         err = traceback.format_exc()
@@ -160,14 +255,24 @@ async def main() -> None:
     sb = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
     print(f"[{WORKER_ID}] up — {SUPABASE_URL}", flush=True)
 
-    # Realtime: wake on any new submission. RLS is applied per subscriber, but
-    # the worker's role sees all rows; either way the safety poll below is the
-    # real guarantee, so a finicky subscription never blocks progress.
-    channel = sb.channel("worker-submissions")
-    channel.on_postgres_changes(
-        "INSERT", schema="public", table="submissions", callback=_on_insert
-    )
-    await channel.subscribe()
+    # Realtime wakes an idle worker the instant a video lands. It is an
+    # ACCELERATOR, not a requirement: the safety poll below finds every job
+    # within POLL_SECONDS regardless. So a failed subscription must NOT take the
+    # worker down — degrade to poll-only and carry on. (RLS is applied per
+    # subscriber, but the worker's role sees all rows.)
+    try:
+        channel = sb.channel("worker-submissions")
+        channel.on_postgres_changes(
+            "INSERT", schema="public", table="submissions", callback=_on_insert
+        )
+        await channel.subscribe()
+        print(f"[{WORKER_ID}] realtime subscribed — instant wake enabled", flush=True)
+    except Exception as e:
+        print(
+            f"[{WORKER_ID}] realtime unavailable ({type(e).__name__}: {e}) — "
+            f"falling back to poll-only every {POLL_SECONDS}s",
+            flush=True,
+        )
 
     # Drain anything queued while we were offline before waiting on a push.
     while not _shutdown.is_set() and await process_one(sb):

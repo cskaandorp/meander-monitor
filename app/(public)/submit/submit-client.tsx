@@ -11,6 +11,7 @@ interface Submission {
   id: string;
   storage_path: string;
   result_path: string | null;
+  result: Record<string, unknown> | null;
   status: "queued" | "processing" | "done" | "failed";
   error: string | null;
   created_at: string;
@@ -251,13 +252,25 @@ export function SubmitClient({ locationId, locationSlug }: SubmitClientProps) {
               )}
 
               {s.status === "done" && resultUrls[s.id] && (
-                <video
-                  src={resultUrls[s.id]}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  className="mt-3 w-full rounded"
-                />
+                <div className="mt-3 space-y-2">
+                  {/\.(mp4|mov|webm)$/i.test(s.result_path ?? "") ? (
+                    <video
+                      src={resultUrls[s.id]}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="w-full rounded"
+                    />
+                  ) : (
+                    <img src={resultUrls[s.id]} alt="Result" className="w-full rounded" />
+                  )}
+                  {s.result && typeof s.result.mean_speed_px_per_frame === "number" && (
+                    <p className="text-xs text-muted-foreground">
+                      Surface motion: {String(s.result.median_speed_px_per_frame)} px/frame
+                      (median), {String(s.result.max_speed_px_per_frame)} peak — uncalibrated.
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           ))}

@@ -18,7 +18,7 @@ Last updated: 2026-09-28.
 |---|---|
 | Base URL | `https://wur.water-munisense.net/webservices/v2` |
 | Auth | **HTTP Basic** |
-| Spec | `docs/munisense-openapi.json` — OpenAPI 3.1.0, "Munisense Portal Webservice" 2.0.0, 346 paths |
+| Spec | OpenAPI 3.1.0, "Munisense Portal Webservice" 2.0.0, 346 paths — **not committed** (1.3 MB); fetch it with the recipe below |
 | Portal UI | `https://wur.water-munisense.net` (SSO via `login.water-munisense.net`) |
 
 **HTTP Basic is the whole story, and it is not documented anywhere.** The spec's
@@ -53,7 +53,9 @@ here" below.
 
 ## Refreshing the saved spec
 
-`docs/munisense-openapi.json` is a snapshot. The live spec lives at
+`docs/munisense-openapi.json` is gitignored — 1.3 MB of vendor spec is not
+worth carrying in the repo when it regenerates in one command. Fetch it when you
+need to look something up. The live spec lives at
 `/ajax.php?action=get_swagger_json` — and *that* endpoint is session-only, not
 Basic-auth, so refreshing it means a real login. Form POST, multipart, with a
 CSRF token bound to the session:
@@ -295,8 +297,9 @@ Nothing a browser touches calls Munisense. The chain is:
 ```
 Munisense ──hourly, HTTP Basic──▶ /api/cron/water ──upsert──▶ Supabase
                ▲                                                  │
-     systemd timer on Patrick              anon key + RLS ────────┘
-     (deploy/meander-water.timer)                                 ▼
+        pg_cron + pg_net ◀────────────────────────────────────────┤
+        (in the database)                  anon key + RLS ────────┘
+                                                                  ▼
                                                       /water  (public page)
 ```
 
@@ -304,7 +307,7 @@ Munisense ──hourly, HTTP Basic──▶ /api/cron/water ──upsert──�
 |---|---|
 | Schema (`water_wells`, `water_measurements`, `water_latest`) | `supabase/migrations/20260928100000_water_levels.sql` |
 | Harvester | `app/api/cron/water/route.ts` |
-| Schedule | `deploy/meander-water.timer` + `.service` |
+| Schedule | `supabase/migrations/20260928120000_water_harvest_schedule.sql` (pg_cron) |
 | Public page | `app/(public)/water/page.tsx` |
 | Chart | `components/timeseries-chart.tsx` |
 | Series colours (validated) | `lib/chart-colors.ts` |
@@ -342,8 +345,24 @@ curl -X POST http://127.0.0.1:3050/api/cron/water \
 # → {"ok":true,"wells":1,"readings":2299}
 ```
 
-Check the schedule with `systemctl list-timers meander-water`, and a failed run
-with `journalctl -u meander-water`.
+The schedule lives in the database, not on the box:
+
+```sql
+select jobname, schedule, active from cron.job;          -- is it scheduled?
+select status_code, content from net._http_response
+  order by id desc limit 5;                              -- did the last runs work?
+select * from cron.job_run_details order by start_time desc limit 5;
+```
+
+`trigger_water_harvest()` reads its URL and secret from **Vault**, so nothing
+secret is in git. Set them once per environment:
+
+```sql
+select vault.create_secret('https://mm.compunist.nl/api/cron/water', 'water_harvest_url');
+select vault.create_secret('<CRON_SECRET from .env.local>',          'water_harvest_secret');
+```
+
+Until both exist the job runs and harmlessly does nothing.
 
 ### Displaying it
 

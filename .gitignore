@@ -41,3 +41,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# The Munisense OpenAPI snapshot — 1.3 MB of vendor spec, regenerated on demand.
+# docs/MUNISENSE.md carries the recipe (it needs a portal login, not the API key).
+docs/munisense-openapi.json

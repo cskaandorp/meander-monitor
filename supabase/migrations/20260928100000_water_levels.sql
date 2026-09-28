@@ -19,7 +19,8 @@
 --      the data is here, and an ETL job if it isn't.
 --
 -- The harvester is an app route (app/api/cron/water/route.ts), fired hourly by
--- a systemd timer (deploy/meander-water.timer). Deliberately NOT the video
+-- pg_cron from inside this database (see the water_harvest_schedule
+-- migration). Deliberately NOT the video
 -- worker: that process exists to turn volunteer footage into flow
 -- measurements, and an unrelated HTTP job has no business sharing its
 -- lifecycle or its deploy.

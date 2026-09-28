@@ -4,7 +4,8 @@ import { createClient } from "@supabase/supabase-js";
 /**
  * Harvest WUR's Munisense water readings into our own tables.
  *
- * Triggered on a schedule (deploy/meander-water.timer), never by a visitor.
+ * Triggered hourly by pg_cron from inside the database (see the
+ * water_harvest_schedule migration), never by a visitor.
  * Deliberately NOT part of the video worker: that process exists to turn
  * volunteer footage into flow measurements, and an unrelated hourly HTTP job
  * has no business sharing its lifecycle.

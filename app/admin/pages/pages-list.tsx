@@ -86,6 +86,13 @@ function SortablePageRow({
         <Label className="text-xs text-muted-foreground">Nav</Label>
       </div>
 
+      {page.link_url && (
+        // Worth calling out: this row has no content of its own, so the editor
+        // will look empty and that is correct.
+        <Badge variant="outline" className="shrink-0" title={`Links to ${page.link_url}`}>
+          Link
+        </Badge>
+      )}
       <Badge variant={page.is_visible ? "default" : "secondary"} className="shrink-0">
         {page.is_visible ? "Published" : "Draft"}
       </Badge>

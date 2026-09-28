@@ -6,6 +6,8 @@ export interface Page {
   menu_order: number | null;
   intro_text: Record<string, unknown> | null;
   banner_url: string | null;
+  /** When set, this row is a nav link only — see the pages_link_url migration. */
+  link_url: string | null;
   banner_position_x: number;
   banner_position_y: number;
   created_at: string;

@@ -14,6 +14,13 @@ interface NavPage {
   id: string;
   title: string;
   slug: string;
+  /** Set when this entry is a link to a page rendered outside the CMS. */
+  link_url?: string | null;
+}
+
+/** A link-only entry points at link_url; a normal page at its slug. */
+export function navHref(page: NavPage): string {
+  return page.link_url || `/${page.slug}`;
 }
 
 export function DesktopNav({ pages }: { pages: NavPage[] }) {
@@ -28,7 +35,7 @@ export function DesktopNav({ pages }: { pages: NavPage[] }) {
         {pathname === "/" && <ActiveBar />}
       </div>
       {pages.map((page) => {
-        const href = `/${page.slug}`;
+        const href = navHref(page);
         const isActive = pathname === href;
         return (
           <div key={page.id} className="relative group pb-4">

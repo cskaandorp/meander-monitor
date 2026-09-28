@@ -1,0 +1,26 @@
+# Hourly trigger for meander-water.service.
+#
+# Install to /etc/systemd/system/meander-water.timer, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now meander-water.timer
+#   systemctl list-timers meander-water   # confirm the next run
+#
+# Why hourly when the sensor's 2G modem only uploads every 6 hours? Because we
+# cannot know WHEN a batch lands. Five runs in six find nothing new, which costs
+# about a dozen cheap requests and bounds staleness to an hour.
+
+[Unit]
+Description=Run the meander-monitor water-level harvest hourly
+
+[Timer]
+# Top of every hour.
+OnCalendar=hourly
+# Spread the load off the exact minute boundary — WUR's portal does not need
+# every consumer arriving simultaneously.
+RandomizedDelaySec=5m
+# Fire on boot if the machine was off when a run was due. Harmless by design:
+# the harvest fetches an overlapping window and upserts, so an extra run is a
+# no-op rather than duplicate rows.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

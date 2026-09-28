@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { navHref } from "./desktop-nav";
 import {
   Sheet,
   SheetContent,
@@ -17,6 +18,8 @@ interface NavPage {
   id: string;
   title: string;
   slug: string;
+  /** Set when this entry is a link to a page rendered outside the CMS. */
+  link_url?: string | null;
 }
 
 function MobileNavLink({
@@ -69,7 +72,7 @@ export function MobileNav({ pages }: { pages: NavPage[] }) {
           {pages.map((page) => (
             <MobileNavLink
               key={page.id}
-              href={`/${page.slug}`}
+              href={navHref(page)}
               label={page.title}
               pathname={pathname}
               onNavigate={() => setOpen(false)}

@@ -6,6 +6,14 @@ export const pageSchema = z.object({
   is_visible: z.boolean().default(false),
   intro_text: z.record(z.string(), z.unknown()).nullable().optional(),
   banner_url: z.string().nullable().optional(),
+  // A nav-link-only page. Mirrors the DB check constraint so a bad value is
+  // caught in the form rather than as a Postgres error.
+  link_url: z
+    .string()
+    .regex(/^(\/|https?:\/\/)/, "Must start with / or http(s)://")
+    .nullable()
+    .optional()
+    .or(z.literal("").transform(() => null)),
   banner_position_x: z.number().int().default(50),
   banner_position_y: z.number().int().default(50),
 });

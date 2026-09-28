@@ -1,0 +1,296 @@
+# meander-monitor's Supabase stack — for LOCAL development.
+#
+# Adapted from CoastSnap's (../coastsnap/supabase), which strips upstream's
+# eleven services down to a handful. What stays dropped, and why:
+#
+#   studio + meta      the web GUI. We use psql and migrations; ~350 MB saved.
+#   supavisor          connection pooler. One app, direct connections are fine.
+#   functions          Deno edge runtime. Nothing uses it.
+#   analytics + vector Logflare. The single biggest memory hog in the upstream
+#                      compose (1–1.5 GB) and nothing here reads it.
+#   api-gw (Envoy)     replaced by nginx — see gateway/nginx.conf.
+#
+# ONE service is added back that CoastSnap drops: imgproxy. meander-monitor
+# serves every page banner, gallery image, landing slide and media preview
+# through Supabase's image transformation endpoint (lib/supabase/image-url.ts
+# rewrites /object/public/ to /render/image/public/). Without imgproxy that
+# endpoint 404s and the whole site renders broken images. CoastSnap resizes in
+# the app instead, which is why it can leave imgproxy out and we cannot.
+#
+# Container names are `mm-` prefixed but deliberately NOT `mm-supabase-*` —
+# that is what the existing production stack on Patrick uses, and keeping them
+# distinct means both could run on one machine during a changeover.
+#
+# Bring up:   cd supabase && docker compose --env-file .env up -d
+# Migrate:    PSQL='docker exec -i -e PGPASSWORD=<pw> mm-db psql -U postgres -d postgres' ./migrate.sh
+name: meander-monitor
+
+services:
+  # ── Gateway ─────────────────────────────────────────────────────────────
+  # The single origin the browser and server both talk to. supabase-js assumes
+  # one base URL with /auth/v1, /rest/v1, /storage/v1 and /realtime/v1 beneath
+  # it; gateway/nginx.conf reproduces upstream's route map exactly.
+  gateway:
+    container_name: mm-gateway
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    depends_on:
+      auth: { condition: service_healthy }
+      rest: { condition: service_healthy }
+      storage: { condition: service_healthy }
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      # Loopback by default. Publishing on 0.0.0.0 would expose an unencrypted
+      # Supabase API on the machine's address — and Docker writes its own
+      # iptables rules, so a host firewall does not necessarily stop it.
+      - "${SUPABASE_BIND:-127.0.0.1}:${SUPABASE_PORT:-8002}:8000"
+
+  # ── Database ────────────────────────────────────────────────────────────
+  db:
+    container_name: mm-db
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    volumes:
+      # Init scripts lifted verbatim from upstream. They create the roles the
+      # other services log in as, and the _realtime schema. These only run on
+      # an EMPTY data directory — changing them later needs a fresh volume
+      # (`docker compose down -v`).
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - db-data:/var/lib/postgresql/data:Z
+      - db-config:/etc/postgresql-custom
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Deliberately NOT setting POSTGRES_USER. The image defaults it to
+      # `supabase_admin`, and its own bootstrap connects as that role to create
+      # `postgres` and run the schema scripts. Override it and initdb makes the
+      # wrong superuser, the bootstrap dies with `role "supabase_admin" does
+      # not exist`, and every other service then fails password auth against
+      # roles that were never created — three containers away from the cause.
+      JWT_EXP: ${JWT_EXPIRY:-3600}
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal   # keeps Realtime's polling out of the logs
+
+  # ── Auth ────────────────────────────────────────────────────────────────
+  # Volunteers sign in ANONYMOUSLY from the QR-code /submit page, which needs
+  # BOTH of these:
+  #
+  #   DISABLE_SIGNUP=false          (an anonymous sign-in IS a signup)
+  #   ENABLE_ANONYMOUS_USERS=true
+  #
+  # That is the one policy difference from CoastSnap, which keeps signup shut.
+  # With either wrong, signInAnonymously() fails and the submit page shows
+  # "Could not start a session". Admin accounts are still created by hand — the
+  # CMS is gated on profiles.is_admin, not on merely being signed in.
+  auth:
+    container_name: mm-auth
+    image: supabase/gotrue:v2.196.0
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS:-}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_ISSUER: ${API_EXTERNAL_URL}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP:-true}
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS:-true}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM:-true}
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_SMS_AUTOCONFIRM: "false"
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-587}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-Meander Monitor}
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+
+  # ── PostgREST ───────────────────────────────────────────────────────────
+  rest:
+    container_name: mm-rest
+    image: postgrest/postgrest:v14.17
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,storage}
+      PGRST_DB_ANON_ROLE: anon
+      # 1000 is upstream's default and the app is written against it — the
+      # water-level page fetches one series per request precisely because a
+      # week of 10-minute buckets is ~1000 rows. Raising this here but not in
+      # production would hide a truncation bug until deploy.
+      PGRST_DB_MAX_ROWS: ${PGRST_DB_MAX_ROWS:-1000}
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_ADMIN_SERVER_PORT: 3001
+      PGRST_ADMIN_SERVER_HOST: localhost
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
+    command: ["postgrest"]
+
+  # ── Realtime ────────────────────────────────────────────────────────────
+  # Load-bearing here, not a nicety: the volunteer's /submit page subscribes to
+  # its own submissions row and the worker's status UPDATE is what makes the
+  # result appear. Without Realtime the page sits on "Processing…" forever.
+  #
+  # ⚠️  The network alias is LOAD-BEARING. Realtime derives its TENANT ID from
+  # the Host header, and SEED_SELF_HOST seeds exactly one tenant, `realtime-dev`.
+  # Upstream does this with an Envoy host rewrite; ours uses the alias below
+  # plus a matching proxy_set_header in nginx.conf. Get either wrong and the
+  # WebSocket handshake returns 503 with no useful error. (Production hit
+  # exactly this on Patrick — see docs/HANDOVER.md.)
+  realtime:
+    container_name: mm-realtime
+    image: supabase/realtime:v2.134.10
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    networks:
+      default:
+        aliases:
+          - realtime-dev.supabase-realtime
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sSfL --head -o /dev/null
+          -H "Authorization: Bearer ${ANON_KEY}"
+          http://localhost:4000/api/tenants/realtime-dev/health
+      timeout: 5s
+      interval: 30s
+      retries: 3
+      start_period: 15s
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: ${POSTGRES_PORT:-5432}
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"
+
+  # ── Storage ─────────────────────────────────────────────────────────────
+  # Three buckets, created by migrations: `web` (public, website media) and
+  # `submissions` + `results` (private, volunteer video).
+  #
+  # 100 MB matches next.config.ts's serverActions.bodySizeLimit and nginx's
+  # client_max_body_size, so one number governs the whole upload path and a
+  # file that clears the app is never rejected here after the work of sending it.
+  storage:
+    container_name: mm-storage
+    image: supabase/storage-api:v1.74.0
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      rest: { condition: service_started }
+      imgproxy: { condition: service_started }
+    healthcheck:
+      # 127.0.0.1, not localhost: in this image `localhost` resolves to [::1]
+      # first, storage-api binds IPv4 only, and the check then fails against a
+      # perfectly healthy server — which compose reports as "dependency failed
+      # to start" for everything downstream.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://rest:3000
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-postgres}
+      STORAGE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      REQUEST_ALLOW_X_FORWARDED_PATH: "true"
+      FILE_SIZE_LIMIT: ${STORAGE_FILE_SIZE_LIMIT:-104857600}
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      GLOBAL_S3_BUCKET: stub
+      TENANT_ID: ${STORAGE_TENANT_ID:-meander-monitor}
+      REGION: ${REGION:-local}
+      # ON, unlike CoastSnap — see the header. lib/supabase/image-url.ts routes
+      # every banner, gallery image and landing slide through /render/image/.
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://imgproxy:5001
+    volumes:
+      - storage-data:/var/lib/storage:z
+
+  # ── imgproxy ────────────────────────────────────────────────────────────
+  # Backs storage-api's /render/image/ endpoint. It reads the SAME volume as
+  # storage rather than fetching over HTTP, which is why the mount below must
+  # match storage's FILE_STORAGE_BACKEND_PATH exactly.
+  imgproxy:
+    container_name: mm-imgproxy
+    image: darthsim/imgproxy:v3.8.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "imgproxy", "health"]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION:-true}
+    volumes:
+      - storage-data:/var/lib/storage:z
+
+volumes:
+  db-data:
+  db-config:
+  storage-data:

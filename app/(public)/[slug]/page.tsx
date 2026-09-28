@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { ContentBlockRenderer } from "@/components/content-block-renderer";
 import { RichtextRenderer } from "@/components/richtext-renderer";
@@ -42,6 +42,15 @@ export default async function DynamicPage({ params }: PageProps) {
 
   if (!page) {
     notFound();
+  }
+
+  // A link-only entry has no content of its own — it exists so that a page
+  // rendered outside the CMS (/water, and others to come) can sit in the
+  // navigation and be reordered there. Someone reaching /<slug> directly, from
+  // an old link or a search result, should land on the real page rather than on
+  // an empty shell.
+  if (page.link_url) {
+    redirect(page.link_url);
   }
 
   const typedPage = page as Page;

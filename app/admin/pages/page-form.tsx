@@ -218,6 +218,10 @@ export function PageForm({ page, blocks: initialBlocks, images: initialImages }:
   const [title, setTitle] = useState(page?.title ?? "");
   const [slug, setSlug] = useState(page?.slug ?? "");
   const [slugManuallyEdited, setSlugManuallyEdited] = useState(!!page);
+  // A link-only entry: this row exists purely to put a page that is rendered
+  // outside the CMS (/water, and others) into the navigation, so it can be
+  // renamed, reordered and hidden like any other menu item.
+  const [linkUrl, setLinkUrl] = useState(page?.link_url ?? "");
   const [isVisible, setIsVisible] = useState(page?.is_visible ?? false);
   const [bannerUrl, setBannerUrl] = useState<string | null>(page?.banner_url ?? null);
   const [bannerPositionX, setBannerPositionX] = useState(page?.banner_position_x ?? 50);
@@ -401,6 +405,7 @@ export function PageForm({ page, blocks: initialBlocks, images: initialImages }:
         banner_url: bannerUrl,
         banner_position_x: bannerPositionX,
         banner_position_y: bannerPositionY,
+        link_url: linkUrl.trim() || null,
       },
       blocksWithOrder,
       imagesWithOrder
@@ -487,6 +492,22 @@ export function PageForm({ page, blocks: initialBlocks, images: initialImages }:
                     placeholder="page-slug"
                   />
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="link_url">Link to (optional)</Label>
+                <Input
+                  id="link_url"
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  placeholder="/water"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty for a normal page. Fill this in to make this entry
+                  a <strong>menu link only</strong> — for pages built outside the
+                  CMS, like <code>/water</code>. The content below is then
+                  ignored, and visiting <code>/{slug || "slug"}</code> redirects
+                  here.
+                </p>
               </div>
             </CardContent>
           </Card>

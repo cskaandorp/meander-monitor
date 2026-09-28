@@ -93,6 +93,7 @@ export async function savePageWithBlocks(
     banner_url?: string | null;
     banner_position_x?: number;
     banner_position_y?: number;
+    link_url?: string | null;
   },
   blocks: {
     id: string;
